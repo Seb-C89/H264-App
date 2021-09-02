@@ -1,6 +1,6 @@
 /**
- * The {@link android.media.MediaCodec} wait until a sufficient number of these buffer's are filled with NAL Unit by the {@link com.example.h264.MainActivity.H264ParseTask}.
- * In parallel the {@link com.example.h264.MainActivity.H264RenderTask} wait until frames are decoded and trigger their render on the {@link android.view.SurfaceView}.
+ * The {@link android.media.MediaCodec} waits until a sufficient number of these buffers are filled with NAL Unit by the {@link com.example.h264.MainActivity.H264ParseTask} thread.
+ * In parallel the {@link com.example.h264.MainActivity.H264RenderTask} thread waits until frames are decoded and triggers their render on the {@link android.view.SurfaceView}.
  * @see https://en.wikipedia.org/wiki/Network_Abstraction_Layer
  * @see https://yumichan.net/video-processing/video-compression/introduction-to-h264-nal-unit/
  */
@@ -47,8 +47,6 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
 
         sv = findViewById(R.id.surfaceView);
             sv.getHolder().addCallback(this);
-
-        Log.v("aaa", "app start");
     }
 
     @Override
@@ -63,16 +61,18 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
             e.printStackTrace();
         }
 
-        /* This anonymous thread wait for a connection then start the two another thread needed for respectively feed the codec and draw decoded frames.
-        This thread is necessary because ServerSocket#accept() is blocking and you cannot block the main thread. */
+
+        /* This anonymous thread waits for a connection then start the two another thread needed for respectively feed the codec (H264ParseTask) and draw decoded frames (H264RenderTask).
+        This thread is necessary because ServerSocket#accept() is blocking and we cannot block the main thread. */
         new Thread(){
+            // TODO Stop this thread.
             @Override
             public void run() {
                 try {
                     ss = new ServerSocket(PORT, 0);
                         Log.v("aaa", "Waiting for connection");
                     s = ss.accept();
-                        s.setSoTimeout(5000); // allow thread to be .interrupt() correctly when .read() can block indefinitely
+                        s.setSoTimeout(5000); // allow thread to be .interrupt() correctly when their nothing to .read()
                     p = new H264ParseTask(m, s.getInputStream());
                         p.start();
                     r = new H264RenderTask(m, sv);
@@ -83,7 +83,8 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
                 }
             }
         }.start();
-        Log.v("aaa", "surfaceCreated()");
+
+        Log.v("aaa", "surfaceCreated() end");
     }
 
     @Override
@@ -117,10 +118,10 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
     }
 
     /**
-     * This thread extract NAL unit and fill codecs buffer's with it.
-     * Each codecs buffer's must be fill with a correct NAL unit (without the NAL start sequence, {@link <a href='https://yumichan.net/video-processing/video-compression/introduction-to-h264-nal-unit/'> wich is 0x000001 or 0x00000001</a>}).
-     * Is query an available buffer with {@link MediaCodec#dequeueInputBuffer(long)}, fill it, and return it to the MediaCodec with {@link MediaCodec#queueInputBuffer(int, int, int, long, int)}.
-     * The parameter presentationTimeUS of the {@link MediaCodec#queueInputBuffer(int, int, int, long, int)} is useless in our case, the codec find this information in the NAL unit.
+     * This thread extracts NAL unit and fills codec's buffers with it.
+     * Each codec's buffer must be fill with a correct NAL unit (without the NAL start sequence, {@link <a href='https://yumichan.net/video-processing/video-compression/introduction-to-h264-nal-unit/'> wich is 0x000001 or 0x00000001</a>}).
+     * It queries an available buffer with {@link MediaCodec#dequeueInputBuffer(long)}, fills it, and returns it to the MediaCodec with {@link MediaCodec#queueInputBuffer(int, int, int, long, int)}.
+     * The parameter presentationTimeUS of the {@link MediaCodec#queueInputBuffer(int, int, int, long, int)} is useless in our case, the codec finds this information in the NAL unit.
      * The codec must be started with {@link MediaCodec#start()} before this thread start.
      */
     private class H264ParseTask extends Thread {
@@ -129,9 +130,9 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
 
         /**
          * @param m is the {@link MediaCodec} instance
-         * @param in is the {@link InputStream} which is fill with h264 data
+         * @param in is the {@link InputStream} filled with h264 data
          */
-        public H264ParseTask(MediaCodec m, InputStream in) { // TODO add param sequence, buffer size
+        public H264ParseTask(MediaCodec m, InputStream in) { // TODO add param nal_seq,capacity
             this.m = m;
             this.in = in;
         }
@@ -141,15 +142,15 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
             Log.v("aaa", "H264ParseTask is running");
             // Socket relative
             int read = 0;                                           // number of bits read by InputStream#read()
-            int cum = 0;                                            // mathematical accumulation of this.read. Represent the total bits received
+            int cum = 0;                                            // cumulative bits read
 
-            // MediaCodec buffer's relative
-            ByteBuffer[] buffers;                                   // buffers used by the MediaCodec class and get from it
+            // MediaCodec's buffer relative
+            ByteBuffer[] buffers;                                   // buffers used by the MediaCodec class getting from MediaCodec#getInputBuffers()
             int buffindex = -1;                                     // the index of the current free buffer getting from MediaCodec#dequeueInputBuffer()
 
-            // Java buffer's like see https://docs.oracle.com/javase/7/docs/api/java/nio/Buffer.html
-            // Java buffer cannot be use because you cannot write directly in it array
-            // buffer to store read bits.
+            // Java's buffer like see https://docs.oracle.com/javase/7/docs/api/java/nio/Buffer.html
+            // Java's buffer cannot be used because we cannot write directly in its array
+            // buffer to store bits read.
             int capacity = 1024;                                    // capacity of the buffer
             int cursor = 0;                                         // is the index of the next element to be read or written
             int limit = 0;                                          // is the index of the first element that should not be read or written
@@ -157,58 +158,59 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
 
             // NAL unit parser relative
             byte[] nal_seq = new byte[]{0x00, 0x00, 0x00, 0x01};    // the NAL unit start sequence, it can be 0x00 0x00 0x00 0x01 or 0x00 0x00 0x01 depending of the encoder
-            int nal_pos = -1;                                       // position of the current founded NAL unit start sequence (0x0000001)
-
+            int nal_pos = -1;                                       // position of the current founded NAL unit start sequence
 
             try {
                 buffers = m.getInputBuffers();                      // get MediaCodec buffer array
 
-                // Read bits until the buffer is filled at least with enough bits for search a NAL unit start sequence (0x0000001)
+                // Read bits until the buffer is filled at least with enough bits for search a NAL unit start sequence (0x00 0x00 0x00 0x01)
                 do {
                     try {
                         read = in.read(bb, limit, capacity-limit);  // read bits from the InputStream and add it in the parse buffer from limit to the end of it
                     } catch (SocketTimeoutException e) {
-                        // if timeout occur continue until the thread is interrupted
+                        // TODO test
+                        // if timeout occur interrupt the thread
+                        interrupt();
                         continue;
                     }
 
                     if(read == -1)                                  // read == -1 when the InputStream reach eof (when the socket is .close())
-                        break;
+                        break;                                      // end of the thread
 
                     limit += read;                                  // update the limit of the buffer
-                    cum += read;                                    // Accumulate read bits
+                    cum += read;                                    // Accumulate bits read
 
-                    if(limit < nal_seq.length)                      // if read bits are smaller than the NAL unit start sequence (0x0000001) pass and continue to add bit in the buffer
-                        continue;
+                    if(limit < nal_seq.length)                      // if read bits are smaller than the NAL unit start sequence (0x00 0x00 0x00 0x01) continue to add bit in the buffer
+                        continue; // cancel the current iteration and start the next one
 
                     //---------------------------------------------------------------------------------------------------------------------------------------------------------------------
 
                     cursor = 0;
-                    // read all bit to the next NAL unit start sequence (0x0000001) and fill the current buffer with it, until the buffer limit is reach
+                    // parse all bit to the next NAL unit start sequence (0x00 0x00 0x00 0x01) and fill the current buffer with it, until the buffer limit is reach
                     do {
-                        nal_pos = find(bb, nal_seq, cursor, limit); // search a NAL unit start sequence (0x0000001) in the parse buffer
-                        if(nal_pos < 0) {                                                                           // IF THE NAL UNIT START SEQUENCE (0x0000001) IS NOT FIND
+                        nal_pos = find(bb, nal_seq, cursor, limit); // search a NAL unit start sequence (0x00 0x00 0x00 0x01) in the parse buffer
+                        if(nal_pos < 0) {                                                                           // IF THE NAL UNIT START SEQUENCE (0x00 0x00 0x00 0x01) IS NOT FIND
                             if(buffindex > -1){                                                                     // if a MediaCodec's buffer is available
-                                buffers[buffindex].put(bb, cursor, limit - (nal_seq.length - 1) - cursor);   // Write all the parse buffer in the current buffer excepted the (nal_seq.length - 1) bit because their can be a part of an incomplete NAL unit start sequence (0x0000001) |...-0x00-0x00-0x00| and the next packet will read |0x01-...|
-                            }                                                                                       // else do nothing, these bits will be overwrite by new ones
+                                buffers[buffindex].put(bb, cursor, limit - (nal_seq.length - 1) - cursor);   // Write all the parse buffer in the current buffer excepted the (nal_seq.length - 1) bit because their can be a part of an incomplete NAL unit start sequence which will be completed at next read.
+                            } else { Log.v("aaa", "NO BUFFER AVAILABLE"); }                                // TODO else
                             cursor = limit-(nal_seq.length-1);                                                      // put the cursor on the last position read
                         }
-                        else {                                                                                                    // IF THE NAL UNIT START SEQUENCE (0x0000001) IS FIND
+                        else {                                                                                                    // IF THE NAL UNIT START SEQUENCE (0x00 0x00 0x00 0x01) IS FIND
                             if(buffindex > -1){                                                                                   // if a MediaCodec's buffer is available
-                                buffers[buffindex].put(bb, cursor, nal_pos - cursor);                                      // Write bits until the NAL unit start sequence (0x0000001) in the buffer
-                                m.queueInputBuffer(buffindex, 0, buffers[buffindex].limit(), 0, 0); // send it. (presentationTimeUS must be >0 (-1 cause crash) but seem to be not used...)
+                                buffers[buffindex].put(bb, cursor, nal_pos - cursor);                                      // Write bits until the NAL unit start sequence (0x00 0x00 0x00 0x01) in the buffer
+                                m.queueInputBuffer(buffindex, 0, buffers[buffindex].limit(), 0, 0); // send it for rendering. (presentationTimeUS must be >=0 (-1 cause crash) but seem to be not used...)
                             }
                             buffindex = m.dequeueInputBuffer(-1); buffers[buffindex].clear();                           // query new one
                             cursor = nal_pos + nal_seq.length;                                                                    // put the cursor on the last position read
                         }
-                    } while (cursor < limit-(nal_seq.length-1));                                                    // read until there is less than the size of a NAL unit start sequence (0x0000001) in the parse buffer
+                    } while (cursor < limit-(nal_seq.length-1));                                                    // read until there is less than the size of a NAL unit start sequence (0x00 0x00 0x00 0x01) in the parse buffer (in case their are two NAL sequences in the buffer)
 
                     System.arraycopy(bb, cursor, bb, 0, limit-cursor); limit = limit-cursor;        // move the the remaining bits to the start of the parse buffer and update its limit
 
                 } while (!Thread.interrupted() & limit >= 0);
 
             } catch (IOException e) {
-                // a networking error is occurred. Like connexion lose. (like cable disconnected or something else. not the socket close())
+                // a networking error is occurred. Like connexion lose. (cable disconnected or something else. not the socket close())
                 Log.v("aaa", "IOException"+e.getMessage());
                 e.printStackTrace();
             } catch (IllegalStateException e) {
@@ -228,7 +230,7 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
 
     /**
      * This thread allow decoded frames to be rendered on the {@link SurfaceView}.
-     * Is query an output buffer containing a decoded frame with {@link MediaCodec#dequeueOutputBuffer(MediaCodec.BufferInfo, long)} and trigger the render of the frame into the surface view by releasing the buffer to the MediaCodec with {@link MediaCodec#releaseOutputBuffer(int, boolean)}.
+     * It queries an output buffer containing a decoded frame with {@link MediaCodec#dequeueOutputBuffer(MediaCodec.BufferInfo, long)} and triggers the render of the frame into the surface view by releasing the buffer to the MediaCodec with {@link MediaCodec#releaseOutputBuffer(int, boolean)}.
      * The codec must be started whit {@link MediaCodec#start()} before this thread start.
      */
     private class H264RenderTask extends Thread {
@@ -265,7 +267,7 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
                             //Log.v("aaa", "format changed");
                             //mediaformat changed
                             break;
-                        default:    // if it is not a special buffer index you can use it like a regular index.
+                        default:    // if it is not a special buffer index we can use it like a regular index.
                             m.releaseOutputBuffer(bufferindex, true);
                     }
                 } catch (IllegalStateException e) {
