@@ -9,7 +9,6 @@ package com.example.h264;
 import androidx.appcompat.app.AppCompatActivity;
 
 import android.annotation.SuppressLint;
-import android.media.MediaCodecList;
 import android.media.MediaFormat;
 import android.os.Bundle;
 import android.util.Log;
@@ -19,15 +18,11 @@ import java.io.InputStream;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
-import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
 
 import android.media.MediaCodec;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
-import android.view.View;
-
-// TODO do something when stream end.
 
 public class MainActivity extends AppCompatActivity implements SurfaceHolder.Callback {
 
@@ -54,37 +49,37 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
         try {
             m = MediaCodec.createDecoderByType("video/avc");
             m.configure(MediaFormat.createVideoFormat("video/avc", sv.getWidth(), sv.getHeight()), sv.getHolder().getSurface(), null, 0);
-            m.start();
             //m.configure(MediaFormat.createVideoFormat("video/mp4v-es", sv.getWidth(), sv.getHeight()), sv.getHolder().getSurface(), null, 0);
+            m.start();
+
+            /* This anonymous thread waits for a connection then start the two another thread needed for respectively feed the codec (H264ParseTask) and draw decoded frames (H264RenderTask).
+            This thread is necessary because ServerSocket#accept() is blocking and we cannot block the main thread. */
+            new Thread(){
+                @Override
+                public void run() {
+                    try {
+                        ss = new ServerSocket(PORT, 0);
+                            Log.v("aaa", "Waiting for connection");
+                        s = ss.accept(); // Blocking!
+                            Log.v("aaa", "Connection accepted");
+                            s.setSoTimeout(5000); // set timeout for all blocking methods. That allow thread to be .interrupt() correctly when their nothing to .read()
+                        p = new H264ParseTask(m, s.getInputStream());
+                            p.start();
+                            Log.v("aaa", "H264ParseTask started");
+                        r = new H264RenderTask(m, sv);
+                            r.start();
+                            Log.v("aaa", "H264RenderTask started");
+                    } catch (IOException e) {
+                        Log.v("aaa", "Error while waiting for a connection");
+                        e.printStackTrace();
+                    }
+                }
+            }.start();
+
         } catch (IOException e) {
             Log.v("aaa", "cannot create or configure the media codec");
             e.printStackTrace();
         }
-
-
-        /* This anonymous thread waits for a connection then start the two another thread needed for respectively feed the codec (H264ParseTask) and draw decoded frames (H264RenderTask).
-        This thread is necessary because ServerSocket#accept() is blocking and we cannot block the main thread. */
-        new Thread(){
-            // TODO Stop this thread.
-            @Override
-            public void run() {
-                try {
-                    ss = new ServerSocket(PORT, 0);
-                        Log.v("aaa", "Waiting for connection");
-                    s = ss.accept();
-                        s.setSoTimeout(5000); // allow thread to be .interrupt() correctly when their nothing to .read()
-                    p = new H264ParseTask(m, s.getInputStream());
-                        p.start();
-                    r = new H264RenderTask(m, sv);
-                        r.start();
-                } catch (IOException e) {
-                    Log.v("aaa", "Error while waiting for a connection");
-                    e.printStackTrace();
-                }
-            }
-        }.start();
-
-        Log.v("aaa", "surfaceCreated() end");
     }
 
     @Override
@@ -97,17 +92,25 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
     public void surfaceDestroyed(SurfaceHolder holder) {
         Log.v("aaa", "surfaceDestroyed()");
 
-        if(r != null)
-            r.interrupt();
-        if(p != null)
-            p.interrupt();
+        try {
+            if (p != null) {
+                p.interrupt();
+                p.join();
+            }
+            if (r != null) {
+                r.interrupt();
+                r.join(); // important because of some blocking function in the thread. Because of its timeouts, they cause call of #Mediacodec object whereas it is immediately deleted at the next instruction without .join() call
+            }
+        } catch(Exception e) {
+            e.printStackTrace();
+        }
 
         m.stop();
         m.release();
     }
 
     @Override
-    protected void onDestroy() { // TODO
+    protected void onDestroy() {
         if(s != null)
             try { s.close(); } catch (IOException e) { Log.v("aaa", "cannot close client socket"); e.printStackTrace(); }
         if(ss != null)
@@ -162,16 +165,20 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
 
             try {
                 buffers = m.getInputBuffers();                      // get MediaCodec buffer array
+                if(buffers.length < 1) {
+                    Log.v("aaa", "MediaCodec has no buffers");
+                    return; // end thread
+                }
 
                 // Read bits until the buffer is filled at least with enough bits for search a NAL unit start sequence (0x00 0x00 0x00 0x01)
                 do {
                     try {
                         read = in.read(bb, limit, capacity-limit);  // read bits from the InputStream and add it in the parse buffer from limit to the end of it
                     } catch (SocketTimeoutException e) {
-                        // TODO test
                         // if timeout occur interrupt the thread
+                        Log.v("aaa", "socket timeout, nothing to read");
                         interrupt();
-                        continue;
+                        break;
                     }
 
                     if(read == -1)                                  // read == -1 when the InputStream reach eof (when the socket is .close())
@@ -192,22 +199,22 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
                         if(nal_pos < 0) {                                                                           // IF THE NAL UNIT START SEQUENCE (0x00 0x00 0x00 0x01) IS NOT FIND
                             if(buffindex > -1){                                                                     // if a MediaCodec's buffer is available
                                 buffers[buffindex].put(bb, cursor, limit - (nal_seq.length - 1) - cursor);   // Write all the parse buffer in the current buffer excepted the (nal_seq.length - 1) bit because their can be a part of an incomplete NAL unit start sequence which will be completed at next read.
-                            } else { Log.v("aaa", "NO BUFFER AVAILABLE"); }                                // TODO else
+                            } else { Log.v("aaa", "No buffer queried"); }
                             cursor = limit-(nal_seq.length-1);                                                      // put the cursor on the last position read
                         }
-                        else {                                                                                                    // IF THE NAL UNIT START SEQUENCE (0x00 0x00 0x00 0x01) IS FIND
-                            if(buffindex > -1){                                                                                   // if a MediaCodec's buffer is available
-                                buffers[buffindex].put(bb, cursor, nal_pos - cursor);                                      // Write bits until the NAL unit start sequence (0x00 0x00 0x00 0x01) in the buffer
+                        else {                                                                                                 // IF THE NAL UNIT START SEQUENCE (0x00 0x00 0x00 0x01) IS FIND
+                            if(buffindex > -1){                                                                                // if a MediaCodec's buffer is available
+                                buffers[buffindex].put(bb, cursor, nal_pos - cursor);                                   // Write bits until the NAL unit start sequence (0x00 0x00 0x00 0x01) in the buffer
                                 m.queueInputBuffer(buffindex, 0, buffers[buffindex].limit(), 0, 0); // send it for rendering. (presentationTimeUS must be >=0 (-1 cause crash) but seem to be not used...)
                             }
-                            buffindex = m.dequeueInputBuffer(-1); buffers[buffindex].clear();                           // query new one
-                            cursor = nal_pos + nal_seq.length;                                                                    // put the cursor on the last position read
+                            buffindex = m.dequeueInputBuffer(1000000); buffers[buffindex].clear();                   // query new one
+                            cursor = nal_pos + nal_seq.length;                                                                // put the cursor on the last position read
                         }
                     } while (cursor < limit-(nal_seq.length-1));                                                    // read until there is less than the size of a NAL unit start sequence (0x00 0x00 0x00 0x01) in the parse buffer (in case their are two NAL sequences in the buffer)
 
                     System.arraycopy(bb, cursor, bb, 0, limit-cursor); limit = limit-cursor;        // move the the remaining bits to the start of the parse buffer and update its limit
 
-                } while (!Thread.interrupted() & limit >= 0);
+                } while (!isInterrupted() & limit >= 0);
 
             } catch (IOException e) {
                 // a networking error is occurred. Like connexion lose. (cable disconnected or something else. not the socket close())
@@ -217,7 +224,7 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
                 // the MediaCodec is not in the good state
                 Log.v("aaa", "IllegalStateException"+e.getMessage());
                 e.printStackTrace();
-            } /*catch (MediaCodec.CodecException e) {
+            } /*catch (MediaCodec.CodecException e) { // REQUIRE API 21
                 Log.v("aaa", "MediaCodec.CodecException"+e.getMessage());
             }*/ catch(Exception e) {
                 Log.v("aaa", e.getClass().getCanonicalName()+e.getMessage());
@@ -242,7 +249,7 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
             this.sv = sv;
         }
 
-        @SuppressLint("WrongConstant")
+        //@SuppressLint("WrongConstant") // TODO test with old version of android studio
         @Override
         public void run() {
             Log.v("aaa", "H264RenderTask is running");
@@ -271,7 +278,7 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
                             m.releaseOutputBuffer(bufferindex, true);
                     }
                 } catch (IllegalStateException e) {
-                    // most time because H264ParseTask end and stop the decoder, causing this exception and stop this thread.
+                    Log.v("aaa", "H264RenderTask ILLEGAL STATS");
                     e.printStackTrace();
                     break;
                 }
