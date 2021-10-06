@@ -302,13 +302,13 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
      * @param key bits sequence to find
      * @param start offset for start
      * @param end limit to end
-     * @return
+     * @return index where {@code key} was found
      */
     static private int find(byte[] buffer, byte[] key, int start, int end) {
         end = (end < buffer.length && end >=0 ) ? end : buffer.length;
         start = (start < buffer.length && start >= 0) ? start : 0;
 
-        for (int i = start; i <= end - (key.length-1); ++i) { // TODO check "i < end" and "key.length +1" OK
+        for (int i = start; i <= end - (key.length-1); ++i) {
             int j=0;
             for (; (i+j) < end && j < key.length && buffer[i + j] == key[j]; ++j);
             if (j == key.length)
