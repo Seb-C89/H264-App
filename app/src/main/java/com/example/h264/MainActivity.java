@@ -297,24 +297,39 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
     }
 
     /**
-     * {@link String#indexOf(String, int)} like. Search {@code key} in {@code buffer} start at {@code start} end at {@code end}.
+     * {@link String#indexOf(String, int)} like. Search {@code key} in {@code buffer} start at {@code start} end at {@code end} like [{@code start}:{@code end}[ ({@code end} is exclude).
      * @param buffer where to search the bits sequence
      * @param key bits sequence to find
-     * @param start offset for start
-     * @param end limit to end
-     * @return index where {@code key} was found
+     * @param start offset to start the search
+     * @param end is the index that should not be read
+     * @return index where {@code key} was found from the beginning of {@code buffer}
      */
     static private int find(byte[] buffer, byte[] key, int start, int end) {
-        end = (end < buffer.length && end >=0 ) ? end : buffer.length;
-        start = (start < buffer.length && start >= 0) ? start : 0;
+        if (!(end <= buffer.length && end >=0 ))
+            return -1;
+        if(!(start < buffer.length && start >= 0))
+            return -1;
 
-        for (int i = start; i <= end - (key.length-1); ++i) {
+        end -= (key.length-1); // Optimisation: is useless to search if there is not enough byte left. Security : The while below can't overflow when it iterate through the key
+
+        for (int i = start; i < end; ++i) {
             int j=0;
-            for (; (i+j) < end && j < key.length && buffer[i + j] == key[j]; ++j);
+            for (; j < key.length && buffer[i + j] == key[j]; ++j);
             if (j == key.length)
                 return i;
         }
         return -1;
+    }
+
+    static private LinkedList<Integer> findAll(byte[] buffer, byte[] key, int start, int end) {
+        LinkedList<Integer> l = new LinkedList<>();
+        for(int p = start; ; p += key.length) {
+            p = find(buffer, key, p, end);
+            if (p == -1)
+                break;
+            l.add(p);
+        }
+        return l;
     }
 }
 
