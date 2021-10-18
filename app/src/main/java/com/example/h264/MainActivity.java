@@ -6,12 +6,19 @@
  */
 package com.example.h264;
 
-import androidx.appcompat.app.AppCompatActivity;
-
-import android.annotation.SuppressLint;
+import android.media.MediaCodec;
+import android.media.MediaCodecInfo;
+import android.media.MediaCodecList;
 import android.media.MediaFormat;
+import android.os.Build;
 import android.os.Bundle;
 import android.util.Log;
+import android.view.SurfaceHolder;
+import android.view.SurfaceView;
+
+//import android.annotation.SuppressLint;
+
+import androidx.appcompat.app.AppCompatActivity;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -19,10 +26,7 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.nio.ByteBuffer;
-
-import android.media.MediaCodec;
-import android.view.SurfaceHolder;
-import android.view.SurfaceView;
+import java.util.LinkedList;
 
 public class MainActivity extends AppCompatActivity implements SurfaceHolder.Callback {
 
@@ -47,9 +51,24 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
     @Override
     public void surfaceCreated(SurfaceHolder holder) {
         try {
-            m = MediaCodec.createDecoderByType("video/avc");
-            m.configure(MediaFormat.createVideoFormat("video/avc", sv.getWidth(), sv.getHeight()), sv.getHolder().getSurface(), null, 0);
-            //m.configure(MediaFormat.createVideoFormat("video/mp4v-es", sv.getWidth(), sv.getHeight()), sv.getHolder().getSurface(), null, 0);
+            if(android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
+                Log.v("aaa", "mediacodec creation");
+                MediaCodecList l = new MediaCodecList(MediaCodecList.REGULAR_CODECS);
+                m = MediaCodec.createByCodecName(l.findDecoderForFormat(MediaFormat.createVideoFormat("video/avc", sv.getWidth(), sv.getHeight())));
+                m.configure(MediaFormat.createVideoFormat("video/avc", sv.getWidth(), sv.getHeight()), sv.getHolder().getSurface(), null, 0);
+                Log.v("aaa", "mediacodec created");
+            } else {
+                Log.v("aaa", "mediacodec creation");
+                m = MediaCodec.createDecoderByType("video/avc");
+                m.configure(MediaFormat.createVideoFormat("video/avc", sv.getWidth(), sv.getHeight()), sv.getHolder().getSurface(), null, 0);
+                Log.v("aaa", "mediacodec created");
+            }
+
+            if(android.os.Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR2){
+                MediaCodecInfo i = m.getCodecInfo();
+                Log.v("aaa", i.getName());
+            }
+
             m.start();
 
             /* This anonymous thread waits for a connection then start the two another thread needed for respectively feed the codec (H264ParseTask) and draw decoded frames (H264RenderTask).
@@ -62,7 +81,7 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
                             Log.v("aaa", "Waiting for connection");
                         s = ss.accept(); // Blocking!
                             Log.v("aaa", "Connection accepted");
-                            s.setSoTimeout(5000); // set timeout for all blocking methods. That allow thread to be .interrupt() correctly when their nothing to .read()
+                            s.setSoTimeout(10000); // set timeout for all blocking methods. That allow thread to be .interrupt() correctly when their nothing to .read()
                         p = new H264ParseTask(m, s.getInputStream());
                             p.start();
                             Log.v("aaa", "H264ParseTask started");
@@ -70,7 +89,7 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
                             r.start();
                             Log.v("aaa", "H264RenderTask started");
                     } catch (IOException e) {
-                        Log.v("aaa", "Error while waiting for a connection");
+                        Log.v("aaa", "Socket closed or Error while waiting for a connection");
                         e.printStackTrace();
                     }
                 }
@@ -150,72 +169,97 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
             // MediaCodec's buffer relative
             ByteBuffer[] buffers;                                   // buffers used by the MediaCodec class getting from MediaCodec#getInputBuffers()
             int buffindex = -1;                                     // the index of the current free buffer getting from MediaCodec#dequeueInputBuffer()
+            ByteBuffer current_bb;                                 // Since LOLLIPOP MediaCodec#getInputBuffer(buffindex) replace MediaCodec#getInputBuffers()
 
-            // Java's buffer like see https://docs.oracle.com/javase/7/docs/api/java/nio/Buffer.html
-            // Java's buffer cannot be used because we cannot write directly in its array
-            // buffer to store bits read.
-            int capacity = 1024;                                    // capacity of the buffer
-            int cursor = 0;                                         // is the index of the next element to be read or written
-            int limit = 0;                                          // is the index of the first element that should not be read or written
-            byte[] bb = new byte[capacity];                         // a buffer used to parse data from the InputStream
+            // Java's #Buffer like see https://docs.oracle.com/javase/7/docs/api/java/nio/Buffer.html
+            // Java's #Buffer is not used because we cannot read many bytes as array easily...
+            int capacity = 10240;                                   // capacity of the buffer
+            int limit = 0;                                          // is the index of the first element that should not be read or written. like #ByteBuffer.limit
+            byte[] bb = new byte[capacity];                         // the buffer used to parse data from the InputStream
+            int from = 0;                                           // used for copying NAL unit from the parse buffer into Mediacodec buffers
+            int to;                                                 // used for copying NAL unit from the parse buffer into Mediacodec buffers
+
+            //byte[] see = new byte[capacity]; // used for debug
 
             // NAL unit parser relative
             byte[] nal_seq = new byte[]{0x00, 0x00, 0x00, 0x01};    // the NAL unit start sequence, it can be 0x00 0x00 0x00 0x01 or 0x00 0x00 0x01 depending of the encoder
-            int nal_pos = -1;                                       // position of the current founded NAL unit start sequence
 
             try {
-                buffers = m.getInputBuffers();                      // get MediaCodec buffer array
-                if(buffers.length < 1) {
-                    Log.v("aaa", "MediaCodec has no buffers");
-                    return; // end thread
-                }
-
-                // Read bits until the buffer is filled at least with enough bits for search a NAL unit start sequence (0x00 0x00 0x00 0x01)
-                do {
-                    try {
-                        read = in.read(bb, limit, capacity-limit);  // read bits from the InputStream and add it in the parse buffer from limit to the end of it
-                    } catch (SocketTimeoutException e) {
-                        // if timeout occur interrupt the thread
-                        Log.v("aaa", "socket timeout, nothing to read");
-                        interrupt();
-                        break;
+                /* Getting buffers for android < LOLLIPOP */
+                buffers = m.getInputBuffers();                      // get MediaCodec's buffer array
+                    if(buffers.length < 1) {
+                        Log.v("aaa", "MediaCodec has not return any buffers");
+                        return; // end thread
                     }
 
+                /* Dequeue a buffer*/
+                buffindex = m.dequeueInputBuffer(1000000);
+                    Log.v("aaa", "dequeu "+buffindex);
+
+                /* Get the dequeued buffer */
+                if(android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP)
+                    current_bb = m.getInputBuffer(buffindex);
+                else
+                    current_bb = buffers[buffindex];
+
+                do {
+                    /* Reading */
+                    read = in.read(bb, limit, capacity - limit);// add bytes read after the remaining byte (ie: can be an hypothetical incomplete NAL unit start sequence)
                     if(read == -1)                                  // read == -1 when the InputStream reach eof (when the socket is .close())
                         break;                                      // end of the thread
 
+                    Log.v("aaa", "read "+read+"from "+limit+"to "+(limit+read));
                     limit += read;                                  // update the limit of the buffer
                     cum += read;                                    // Accumulate bits read
 
                     if(limit < nal_seq.length)                      // if read bits are smaller than the NAL unit start sequence (0x00 0x00 0x00 0x01) continue to add bit in the buffer
                         continue; // cancel the current iteration and start the next one
 
-                    //---------------------------------------------------------------------------------------------------------------------------------------------------------------------
+                    /* Parsing */
+                    from = 0;
+                    to = find(bb, nal_seq, from, limit);            // Search a NAL unit start sequence from 0
+                    while(to != -1) {                               // if a NAL unit is find
+                        current_bb.put(bb, from, to - from); // copy bytes from the previous NAL unit start sequence to the new one in the current buffer
+                            //Arrays.fill(see, (byte) 2);
+                            //System.arraycopy(bb, from, see, 0, to - from);
+                            Log.v("aaa", "copy from " + from + "to " + (from + to - from));
 
-                    cursor = 0;
-                    // parse all bit to the next NAL unit start sequence (0x00 0x00 0x00 0x01) and fill the current buffer with it, until the buffer limit is reach
-                    do {
-                        nal_pos = find(bb, nal_seq, cursor, limit); // search a NAL unit start sequence (0x00 0x00 0x00 0x01) in the parse buffer
-                        if(nal_pos < 0) {                                                                           // IF THE NAL UNIT START SEQUENCE (0x00 0x00 0x00 0x01) IS NOT FIND
-                            if(buffindex > -1){                                                                     // if a MediaCodec's buffer is available
-                                buffers[buffindex].put(bb, cursor, limit - (nal_seq.length - 1) - cursor);   // Write all the parse buffer in the current buffer excepted the (nal_seq.length - 1) bit because their can be a part of an incomplete NAL unit start sequence which will be completed at next read.
-                            } else { Log.v("aaa", "No buffer queried"); }
-                            cursor = limit-(nal_seq.length-1);                                                      // put the cursor on the last position read
-                        }
-                        else {                                                                                                 // IF THE NAL UNIT START SEQUENCE (0x00 0x00 0x00 0x01) IS FIND
-                            if(buffindex > -1){                                                                                // if a MediaCodec's buffer is available
-                                buffers[buffindex].put(bb, cursor, nal_pos - cursor);                                   // Write bits until the NAL unit start sequence (0x00 0x00 0x00 0x01) in the buffer
-                                m.queueInputBuffer(buffindex, 0, buffers[buffindex].limit(), 0, 0); // send it for rendering. (presentationTimeUS must be >=0 (-1 cause crash) but seem to be not used...)
-                            }
-                            buffindex = m.dequeueInputBuffer(1000000); buffers[buffindex].clear();                   // query new one
-                            cursor = nal_pos + nal_seq.length;                                                                // put the cursor on the last position read
-                        }
-                    } while (cursor < limit-(nal_seq.length-1));                                                    // read until there is less than the size of a NAL unit start sequence (0x00 0x00 0x00 0x01) in the parse buffer (in case their are two NAL sequences in the buffer)
+                        m.queueInputBuffer(buffindex, 0, current_bb.limit(), 0, 0); // queue the buffer
+                            Log.v("aaa", "queu " + buffindex);
 
-                    System.arraycopy(bb, cursor, bb, 0, limit-cursor); limit = limit-cursor;        // move the the remaining bits to the start of the parse buffer and update its limit
+                        buffindex = m.dequeueInputBuffer(1000000);                                  // dequeue new one
+                            Log.v("aaa", "dequeu " + buffindex);
 
-                } while (!isInterrupted() & limit >= 0);
+                        if(android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP)     // getting it
+                            current_bb = m.getInputBuffer(buffindex);
+                        else
+                            current_bb = buffers[buffindex];
 
+                        from = to;                                                                      // memorise the position of the NAL sequence
+                        to = find(bb, nal_seq, from+nal_seq.length, limit);                        // search for the next NAL unit
+                    }
+                    // copy from the last NAL unit to the end of buffer, but not the (nal_seq.length-1) bytes in case of their are part of an incomplete NAL
+                    to = limit - (nal_seq.length-1);
+                    if (from < to) {
+                        current_bb.put(bb, from, to - from);
+                        //Arrays.fill(see, (byte) 2);
+                        //System.arraycopy(bb, from, see, 0, to - from);
+                        Log.v("aaa", "copy all from " + from + "to " + (from + (to - from)));
+                    }
+
+                    // move the remaining hypothetical incomplete NAL (nal_seq.length-1 bytes) to the beginning of the buffer.
+                    // At the next step of the while, read() will write after them and hypothetically complete the sequence which will be found by find()
+                    System.arraycopy(bb, limit - (nal_seq.length-1), bb, 0, (nal_seq.length - 1)); // like #ByteBuffer.compact()
+                        //Arrays.fill(see, (byte) 2);
+                        //System.arraycopy(bb, limit - (nal_seq.length-1), see, 0, (nal_seq.length - 1));
+                        Log.v("aaa", "remaining from "+(limit - (nal_seq.length-1)));
+                    limit = (nal_seq.length - 1);
+                } while (!isInterrupted());
+
+            } catch (SocketTimeoutException e) {
+                // if timeout occur interrupt the thread
+                Log.v("aaa", "socket timeout, nothing to read");
+                e.printStackTrace();
             } catch (IOException e) {
                 // a networking error is occurred. Like connexion lose. (cable disconnected or something else. not the socket close())
                 Log.v("aaa", "IOException"+e.getMessage());
@@ -259,7 +303,7 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
 
             do {
                 try {
-                    bufferindex = m.dequeueOutputBuffer(info, 5000); // the method return either a special number or a buffer index //@SuppressLint("WrongConstant")
+                    bufferindex = m.dequeueOutputBuffer(info, 1000000); // the method return either a special number or a buffer index
                     switch (bufferindex) {
                         case MediaCodec.INFO_TRY_AGAIN_LATER:
                             //Log.v("aaa", "no output available yet");
@@ -271,10 +315,11 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
                             //encodeOutputBuffers = mDecodeMediaCodec.getOutputBuffers();
                             break;
                         case MediaCodec.INFO_OUTPUT_FORMAT_CHANGED:
-                            //Log.v("aaa", "format changed");
                             //mediaformat changed
+                            Log.v("aaa", "format changed : "+m.getOutputFormat().toString());
                             break;
                         default:    // if it is not a special buffer index we can use it like a regular index.
+                            //Log.v("aaa", "frame release");
                             m.releaseOutputBuffer(bufferindex, true);
                     }
                 } catch (IllegalStateException e) {
