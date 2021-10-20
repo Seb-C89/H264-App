@@ -275,6 +275,9 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
                 e.printStackTrace();
             }
 
+            if(current_bb != null)
+                m.queueInputBuffer(buffindex, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM);
+
             Log.v("aaa", "H264ParseTask end");
         }
     }
@@ -300,6 +303,7 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
 
             int bufferindex = -1;
             MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
+            boolean done = false;
 
             do {
                 try {
@@ -321,13 +325,18 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
                         default:    // if it is not a special buffer index we can use it like a regular index.
                             //Log.v("aaa", "frame release");
                             m.releaseOutputBuffer(bufferindex, true);
+                            //Log.v("aaa", "frame release");
+                            if((info.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
+                                Log.v("aaa", "Last buffer released");
+                                done = true;
+                            }
                     }
                 } catch (IllegalStateException e) {
                     Log.v("aaa", "H264RenderTask ILLEGAL STATS");
                     e.printStackTrace();
                     break;
                 }
-            } while(!isInterrupted());
+            } while(!isInterrupted() || !done);
 
             // Hide the SurfaceView. For example...
             /*runOnUiThread(new Runnable() {
