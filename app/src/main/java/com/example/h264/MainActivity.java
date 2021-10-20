@@ -51,18 +51,16 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
     @Override
     public void surfaceCreated(SurfaceHolder holder) {
         try {
+            Log.v("aaa", "mediacodec creation");
             if(android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
-                Log.v("aaa", "mediacodec creation");
                 MediaCodecList l = new MediaCodecList(MediaCodecList.REGULAR_CODECS);
                 m = MediaCodec.createByCodecName(l.findDecoderForFormat(MediaFormat.createVideoFormat("video/avc", sv.getWidth(), sv.getHeight())));
-                m.configure(MediaFormat.createVideoFormat("video/avc", sv.getWidth(), sv.getHeight()), sv.getHolder().getSurface(), null, 0);
-                Log.v("aaa", "mediacodec created");
             } else {
-                Log.v("aaa", "mediacodec creation");
                 m = MediaCodec.createDecoderByType("video/avc");
-                m.configure(MediaFormat.createVideoFormat("video/avc", sv.getWidth(), sv.getHeight()), sv.getHolder().getSurface(), null, 0);
-                Log.v("aaa", "mediacodec created");
             }
+
+            m.configure(MediaFormat.createVideoFormat("video/avc", sv.getWidth(), sv.getHeight()), sv.getHolder().getSurface(), null, 0);
+            Log.v("aaa", "mediacodec created");
 
             if(android.os.Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR2){
                 MediaCodecInfo i = m.getCodecInfo();
@@ -118,7 +116,7 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
             }
             if (r != null) {
                 r.interrupt();
-                r.join(); // important because of some blocking function in the thread. Because of its timeouts, they cause call of #Mediacodec object whereas it is immediately deleted at the next instruction without .join() call
+                r.join(); // important because of some blocking function in the thread. Because of its timeouts, they cause call of #Mediacodec object whereas it is not available yet at the next instruction without .join() call
             }
         } catch(Exception e) {
             e.printStackTrace();
@@ -140,8 +138,8 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
     }
 
     /**
-     * This thread extracts NAL unit and fills codec's buffers with it.
-     * Each codec's buffer must be fill with a correct NAL unit (without the NAL start sequence, {@link <a href='https://yumichan.net/video-processing/video-compression/introduction-to-h264-nal-unit/'> wich is 0x000001 or 0x00000001</a>}).
+     * This thread extracts NAL units and fills codec's buffers with them.
+     * Each codec's buffer must be fill with only one entire NAL unit.
      * It queries an available buffer with {@link MediaCodec#dequeueInputBuffer(long)}, fills it, and returns it to the MediaCodec with {@link MediaCodec#queueInputBuffer(int, int, int, long, int)}.
      * The parameter presentationTimeUS of the {@link MediaCodec#queueInputBuffer(int, int, int, long, int)} is useless in our case, the codec finds this information in the NAL unit.
      * The codec must be started with {@link MediaCodec#start()} before this thread start.
@@ -169,10 +167,10 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
             // MediaCodec's buffer relative
             ByteBuffer[] buffers;                                   // buffers used by the MediaCodec class getting from MediaCodec#getInputBuffers()
             int buffindex = -1;                                     // the index of the current free buffer getting from MediaCodec#dequeueInputBuffer()
-            ByteBuffer current_bb;                                 // Since LOLLIPOP MediaCodec#getInputBuffer(buffindex) replace MediaCodec#getInputBuffers()
+            ByteBuffer current_bb = null;                           // Since LOLLIPOP MediaCodec#getInputBuffer(buffindex) replace MediaCodec#getInputBuffers()
 
             // Java's #Buffer like see https://docs.oracle.com/javase/7/docs/api/java/nio/Buffer.html
-            // Java's #Buffer is not used because we cannot read many bytes as array easily...
+            // Java's #Buffer is not used because it cannot read many bytes as array easily...
             int capacity = 10240;                                   // capacity of the buffer
             int limit = 0;                                          // is the index of the first element that should not be read or written. like #ByteBuffer.limit
             byte[] bb = new byte[capacity];                         // the buffer used to parse data from the InputStream
@@ -206,20 +204,20 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
                     /* Reading */
                     read = in.read(bb, limit, capacity - limit);// add bytes read after the remaining byte (ie: can be an hypothetical incomplete NAL unit start sequence)
                     if(read == -1)                                  // read == -1 when the InputStream reach eof (when the socket is .close())
-                        break;                                      // end of the thread
+                        break;  // end of the thread
 
                     Log.v("aaa", "read "+read+"from "+limit+"to "+(limit+read));
                     limit += read;                                  // update the limit of the buffer
                     cum += read;                                    // Accumulate bits read
 
                     if(limit < nal_seq.length)                      // if read bits are smaller than the NAL unit start sequence (0x00 0x00 0x00 0x01) continue to add bit in the buffer
-                        continue; // cancel the current iteration and start the next one
+                        continue;   // cancel the current iteration and start the next one
 
                     /* Parsing */
                     from = 0;
                     to = find(bb, nal_seq, from, limit);            // Search a NAL unit start sequence from 0
                     while(to != -1) {                               // if a NAL unit is find
-                        current_bb.put(bb, from, to - from); // copy bytes from the previous NAL unit start sequence to the new one in the current buffer
+                        current_bb.put(bb, from, to - from); 	// copy bytes from the previous NAL unit start sequence to the new one in the current buffer
                             //Arrays.fill(see, (byte) 2);
                             //System.arraycopy(bb, from, see, 0, to - from);
                             Log.v("aaa", "copy from " + from + "to " + (from + to - from));
@@ -235,8 +233,8 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
                         else
                             current_bb = buffers[buffindex];
 
-                        from = to;                                                                      // memorise the position of the NAL sequence
-                        to = find(bb, nal_seq, from+nal_seq.length, limit);                        // search for the next NAL unit
+                        from = to;                                                                 // memorise the position of the NAL sequence
+                        to = find(bb, nal_seq, from+nal_seq.length, limit);                   // search for the next NAL sequence
                     }
                     // copy from the last NAL unit to the end of buffer, but not the (nal_seq.length-1) bytes in case of their are part of an incomplete NAL
                     to = limit - (nal_seq.length-1);
@@ -284,7 +282,7 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
 
     /**
      * This thread allow decoded frames to be rendered on the {@link SurfaceView}.
-     * It queries an output buffer containing a decoded frame with {@link MediaCodec#dequeueOutputBuffer(MediaCodec.BufferInfo, long)} and triggers the render of the frame into the surface view by releasing the buffer to the MediaCodec with {@link MediaCodec#releaseOutputBuffer(int, boolean)}.
+     * It queries an output buffer containing a decoded frame with {@link MediaCodec#dequeueOutputBuffer(MediaCodec.BufferInfo, long)} and triggers the render of the frame into the surface view by releasing the buffer {@link MediaCodec#releaseOutputBuffer(int, boolean)}.
      * The codec must be started whit {@link MediaCodec#start()} before this thread start.
      */
     private class H264RenderTask extends Thread {
@@ -296,7 +294,6 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
             this.sv = sv;
         }
 
-        //@SuppressLint("WrongConstant") // TODO test with old version of android studio
         @Override
         public void run() {
             Log.v("aaa", "H264RenderTask is running");
@@ -314,8 +311,7 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
                             break;
                         case MediaCodec.INFO_OUTPUT_BUFFERS_CHANGED:
                             /* this is not use in our case */
-                            //Log.v("aaa", "info changed");
-                            //Log.v("aaa", "buffers.length = "+m.getOutputBuffers().length); // get the new lengths
+                            //Log.v("aaa", "OUTPUT_BUFFERS_CHANGED buffers.length = "+m.getOutputBuffers().length); // get the new lengths
                             //encodeOutputBuffers = mDecodeMediaCodec.getOutputBuffers();
                             break;
                         case MediaCodec.INFO_OUTPUT_FORMAT_CHANGED:
@@ -323,7 +319,6 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
                             Log.v("aaa", "format changed : "+m.getOutputFormat().toString());
                             break;
                         default:    // if it is not a special buffer index we can use it like a regular index.
-                            //Log.v("aaa", "frame release");
                             m.releaseOutputBuffer(bufferindex, true);
                             //Log.v("aaa", "frame release");
                             if((info.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
