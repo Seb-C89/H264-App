@@ -16,8 +16,6 @@ import android.util.Log;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 
-//import android.annotation.SuppressLint;
-
 import androidx.appcompat.app.AppCompatActivity;
 
 import java.io.IOException;
@@ -298,7 +296,7 @@ public class MainActivity extends AppCompatActivity implements SurfaceHolder.Cal
         public void run() {
             Log.v("aaa", "H264RenderTask is running");
 
-            int bufferindex = -1;
+            int bufferindex;
             MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
             boolean done = false;
 
